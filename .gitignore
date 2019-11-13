@@ -18,3 +18,4 @@ nbproject/
 __pycache__/
 src/__pycache__/
 *.py[cod]
+profiling_utils.py

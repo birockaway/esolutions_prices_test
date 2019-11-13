@@ -8,6 +8,7 @@ import os
 import boto3
 
 
+
 def parse_item(product_card):
     common_keys = {"product_" + k: v for k, v in product_card.items() if k != "prices"}
 
@@ -18,7 +19,7 @@ def parse_item(product_card):
     if type(offer_details) != list:
         offer_details = [offer_details]
 
-    eshop_offers = [{**common_keys, **offer_detail} for offer_detail in offer_details]
+    eshop_offers = ({**common_keys, **offer_detail} for offer_detail in offer_details)
     return eshop_offers
 
 
@@ -35,7 +36,7 @@ def process_xml(path):
             parsed_lists = (parse_item(item) for item in doc["price-changes"]["prices"]["product"])
         else:
             parsed_lists = (parse_item(item) for item in doc['price-check']['product'])
-        unnested_list = list(chain(*parsed_lists))
+        unnested_list = chain(*parsed_lists)
         logging.info(f"File {filename} unnested.")
         return unnested_list
 
@@ -98,7 +99,6 @@ if __name__ == '__main__':
     # copy it to save memory
     files_to_download, files_to_download_backup = tee(files_to_download)
 
-
     max_timestamp_this_run = [{"max_timestamp_this_run": max(file.last_modified
                                                              for file in files_to_download_backup).replace(
         tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")}]
@@ -134,7 +134,7 @@ if __name__ == '__main__':
 
         file_data = process_xml(file_path)
 
-        results = [
+        results = (
             # filter item columns to only relevant ones and add utctime_started
             {
                 **{colname: colval for colname, colval in item.items() if colname in wanted_columns},
@@ -145,7 +145,7 @@ if __name__ == '__main__':
             in file_data
             # drop empty sublists or None results
             if file_data
-        ]
+        )
 
         logging.info(f"File {filename} results collected. Writing.")
 
@@ -158,3 +158,4 @@ if __name__ == '__main__':
         logging.info(f"File {filename} processing finished.")
 
     logging.info("Done.")
+
