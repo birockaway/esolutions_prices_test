@@ -23,7 +23,7 @@ def parse_item(product_card):
     return eshop_offers
 
 
-def process_xml(path):
+def process_xml(path, filename, utctime_started):
     with open(path) as fd:
         try:
             doc = xmltodict.parse(fd.read())
@@ -33,12 +33,24 @@ def process_xml(path):
             return None
     try:
         if "-hf-" in path:
-            parsed_lists = (parse_item(item) for item in doc["price-changes"]["prices"]["product"])
+            for item in doc["price-changes"]["prices"]["product"]:
+                pitem = parse_item(item)
+                for row in pitem:
+                    yield {
+                        **{colname: colval for colname, colval in row.items() if colname in wanted_columns},
+                        **{'utctime_started': utctime_started},
+                        **{'filename': filename}
+                    }
         else:
-            parsed_lists = (parse_item(item) for item in doc['price-check']['product'])
-        unnested_list = chain(*parsed_lists)
-        logging.info(f"File {filename} unnested.")
-        return unnested_list
+            for item in doc['price-check']['product']:
+                pitem = parse_item(item)
+                for row in pitem:
+                    yield {
+                        **{colname: colval for colname, colval in row.items() if colname in wanted_columns},
+                        **{'utctime_started': utctime_started},
+                        **{'filename': filename}
+                    }
+
 
     except Exception as e:
         logging.debug(f"Failed to unnest. Filename: {filename}. Exception {e}")
@@ -132,28 +144,13 @@ if __name__ == '__main__':
         filename = file_path.split('/')[-1]
         logging.info(f"Processing file {filename}")
 
-        file_data = process_xml(file_path)
-
-        results = (
-            # filter item columns to only relevant ones and add utctime_started
-            {
-                **{colname: colval for colname, colval in item.items() if colname in wanted_columns},
-                **{'utctime_started': utctime_started},
-                **{'filename': filename}
-            }
-            for item
-            in file_data
-            # drop empty sublists or None results
-            if file_data
-        )
-
-        logging.info(f"File {filename} results collected. Writing.")
-
         with open(f"{kbc_datadir}out/tables/esolutions_prices.csv", 'a+', encoding="utf-8") as f:
             dict_writer = csv.DictWriter(f, wanted_columns + ["utctime_started", "filename"])
             if file_order == 0:
                 dict_writer.writeheader()
-            dict_writer.writerows(results)
+
+            for csv_row in process_xml(file_path, filename, utctime_started):
+                dict_writer.writerow(csv_row)
 
         logging.info(f"File {filename} processing finished.")
 
