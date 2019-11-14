@@ -1,59 +1,68 @@
 from keboola import docker
-import xmltodict
-from itertools import chain, tee
+import xml.sax
+from collections import deque
+from contextlib import suppress
+from csv import DictWriter
+from itertools import tee
 import logging
 import datetime
-import csv
 import os
 import boto3
 
 
+class PricesHandler(xml.sax.ContentHandler):
+    PRICE_ATTR_NAMES = [
+        'url', 'eshop', 'product-name', 'product-percent-match', 'stock', 'availability',
+        'assignement-status', 'checked-status',
+    ]
 
-def parse_item(product_card):
-    common_keys = {"product_" + k: v for k, v in product_card.items() if k != "prices"}
+    def __init__(self, writer, filedata={}):
+        super().__init__()
+        self.path = deque()
+        self.current_row = dict()
+        self.writer = writer
+        self.filedata = filedata
 
-    if product_card.get("prices") is not None:
-        offer_details = product_card["prices"]["price"]
-    else:
-        return [common_keys]
-    if type(offer_details) != list:
-        offer_details = [offer_details]
+    def startElement(self, name, attrs):
+        if name in ['price-check', 'date', 'price-changes']:
+            return
 
-    eshop_offers = ({**common_keys, **offer_detail} for offer_detail in offer_details)
-    return eshop_offers
+        self.path.append(name)
 
+        self.current_row.update(self.filedata)
 
-def process_xml(path, filename, utctime_started):
-    with open(path) as fd:
-        try:
-            doc = xmltodict.parse(fd.read())
-            logging.info(f"File {path.split('/')[-1]} converted to dictionary.")
-        except Exception as e:
-            logging.debug(f"Failed to convert to dict. Filename: {filename}. Exception {e}")
-            return None
-    try:
-        if "-hf-" in path:
-            for item in doc["price-changes"]["prices"]["product"]:
-                pitem = parse_item(item)
-                for row in pitem:
-                    yield {
-                        **{colname: colval for colname, colval in row.items() if colname in wanted_columns},
-                        **{'utctime_started': utctime_started},
-                        **{'filename': filename}
-                    }
-        else:
-            for item in doc['price-check']['product']:
-                pitem = parse_item(item)
-                for row in pitem:
-                    yield {
-                        **{colname: colval for colname, colval in row.items() if colname in wanted_columns},
-                        **{'utctime_started': utctime_started},
-                        **{'filename': filename}
-                    }
+        if attrs:
+            self.current_row.update(
+                {
+                    f"competitor_{aname}": attrs.getValue(aname)
+                    for aname
+                    in attrs.getNames()
+                    if aname in PricesHandler.PRICE_ATTR_NAMES
+                }
+            )
 
+    def endElement(self, name):
+        if name in ['price-check', 'date', 'price-changes']:
+            return
 
-    except Exception as e:
-        logging.debug(f"Failed to unnest. Filename: {filename}. Exception {e}")
+        if self.path[-1] == 'product':
+            self.current_row = {}
+
+        self.path.pop()
+
+    def characters(self, content):
+        if not self.path or not content.strip():
+            return
+
+        colname = self.path[-1]
+        self.current_row[colname] = content
+
+        if colname == 'price' and self.path[-2] == 'prices':
+            self.writer.writerow(self.current_row)
+            del self.current_row['price']
+            for cname in PricesHandler.PRICE_ATTR_NAMES:
+                with suppress(KeyError):
+                    del self.current_row[cname]
 
 
 if __name__ == '__main__':
@@ -118,7 +127,8 @@ if __name__ == '__main__':
     logging.info("Collected files to download.")
 
     # create temp directory to store downloaded files
-    os.makedirs(f"{kbc_datadir}downloaded_xmls")
+    if not os.path.exists(f'{kbc_datadir}downloaded_xmls'):
+        os.makedirs(f'{kbc_datadir}downloaded_xmls')
 
     logging.info("Downloading files.")
 
@@ -135,24 +145,22 @@ if __name__ == '__main__':
     del files_to_download, session, s3, esol_bucket
 
     with open(f"{kbc_datadir}out/tables/esolutions_last_timestamp.csv", 'w+', encoding="utf-8") as f:
-        dict_writer = csv.DictWriter(f, ["max_timestamp_this_run"])
+        dict_writer = DictWriter(f, ["max_timestamp_this_run"])
         dict_writer.writeheader()
         dict_writer.writerows(max_timestamp_this_run)
 
-    for file_order, file_path in enumerate(files_to_process):
+    with open(f'{kbc_datadir}out/tables/esolutions_prices.csv', 'w', encoding='utf8') as csvfile:
+        dw = DictWriter(csvfile, fieldnames=list(set(wanted_columns + ["utctime_started", "filename"])))
+        dw.writeheader()
 
-        filename = file_path.split('/')[-1]
-        logging.info(f"Processing file {filename}")
+        for file in files_to_process:
 
-        with open(f"{kbc_datadir}out/tables/esolutions_prices.csv", 'a+', encoding="utf-8") as f:
-            dict_writer = csv.DictWriter(f, wanted_columns + ["utctime_started", "filename"])
-            if file_order == 0:
-                dict_writer.writeheader()
+            filename = file.split('/')[-1]
+            logging.info(f"Processing file {filename}")
 
-            for csv_row in process_xml(file_path, filename, utctime_started):
-                dict_writer.writerow(csv_row)
-
-        logging.info(f"File {filename} processing finished.")
+            h = PricesHandler(dw, {'filename': filename, 'utctime_started': utctime_started})
+            xml.sax.parse(file, h)
+            logging.info(f"File {filename} processing finished.")
 
     logging.info("Done.")
 
