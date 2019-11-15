@@ -1,6 +1,6 @@
 from keboola import docker
 import xml.sax
-from collections import deque
+from collections import deque, defaultdict
 from contextlib import suppress
 from csv import DictWriter
 from itertools import tee
@@ -11,58 +11,78 @@ import boto3
 
 
 class PricesHandler(xml.sax.ContentHandler):
-    PRICE_ATTR_NAMES = [
-        'url', 'eshop', 'product-name', 'product-percent-match', 'stock', 'availability',
-        'assignement-status', 'checked-status',
-    ]
 
-    def __init__(self, writer, filedata={}):
+    PRICE_ATTR_COLS_PREFIX = 'competitor_'
+
+    def __init__(self, *, writer, colnames, filedata=None):
         super().__init__()
         self.path = deque()
-        self.current_row = dict()
+        self.current_row = {}
+        self.current_content = []
         self.writer = writer
-        self.filedata = filedata
+
+        self.competitor_attr_col_names = [
+            cn[len(PricesHandler.PRICE_ATTR_COLS_PREFIX):]
+            for cn
+            in colnames
+            if cn.startswith(PricesHandler.PRICE_ATTR_COLS_PREFIX)
+        ]
+        self.tag_col_names = [
+            cn
+            for cn
+            in colnames
+            if not cn.startswith(PricesHandler.PRICE_ATTR_COLS_PREFIX)
+        ]
+
+        self.filedata = filedata if filedata else {}
 
     def startElement(self, name, attrs):
-        if name in ['price-check', 'date', 'price-changes']:
-            return
-
-        self.path.append(name)
-
-        self.current_row.update(self.filedata)
-
-        if attrs:
+        if attrs and name == 'price' and self.path[-1] == 'prices':
             self.current_row.update(
                 {
-                    f"competitor_{aname}": attrs.getValue(aname)
+                    f"{PricesHandler.PRICE_ATTR_COLS_PREFIX}{aname}": attrs.getValue(aname)
                     for aname
                     in attrs.getNames()
-                    if aname in PricesHandler.PRICE_ATTR_NAMES
+                    if aname in self.competitor_attr_col_names
                 }
             )
 
+        self.path.append(name)
+
     def endElement(self, name):
-        if name in ['price-check', 'date', 'price-changes']:
-            return
-
-        if self.path[-1] == 'product':
-            self.current_row = {}
-
         self.path.pop()
 
-    def characters(self, content):
-        if not self.path or not content.strip():
-            return
+        if name == 'product':
+            # the current product is done -> reset all product info
+            self.current_row = {}
 
-        colname = self.path[-1]
-        self.current_row[colname] = content
+        if name in self.tag_col_names:
+            # join the parts of the current content into a single string and pass it to the current row if not empty
+            value = ''.join(self.current_content).strip()
+            if value:
+                self.current_row[name] = value
 
-        if colname == 'price' and self.path[-2] == 'prices':
-            self.writer.writerow(self.current_row)
+        if name == 'price' and self.path[-1] == 'prices':
+            # we have just finished reading a competitor info
+            # -> write the result, and drop all the info pertaining to the current competitor
+
+            self.writer.writerow({**self.current_row, **self.filedata})
+
             del self.current_row['price']
-            for cname in PricesHandler.PRICE_ATTR_NAMES:
+            for cname in self.competitor_attr_col_names:
                 with suppress(KeyError):
                     del self.current_row[cname]
+
+        self.current_content = []
+
+    def characters(self, content):
+        if not self.path:
+            return
+
+        if self.path[-1] in self.tag_col_names:
+            # the content for a single tag sometimes comes in more than one segment for unclear reasons,
+            # so we need to collect all of them and join later
+            self.current_content.append(content)
 
 
 if __name__ == '__main__':
@@ -108,21 +128,29 @@ if __name__ == '__main__':
 
     # download xml files that are xml, were not present in the last download, have allowed pattern
     # or specifically enumerated files
-    files_to_download = (file for file in esol_bucket.objects.all()
-                           if (file.key.endswith(".xml")
-                           and any(name_pattern in file.key for name_pattern in allowed_file_patterns)
-                           and all(name_pattern not in file.key for name_pattern in forbidden_file_patterns)
-                           and file.last_modified.replace(tzinfo=None) >
-                           datetime.datetime.strptime(last_processed_timestamp, "%Y-%m-%d %H:%M:%S"))
-                           or (file.key in input_fileset)
-                         )
+    files_to_download = (
+            file
+            for file
+            in esol_bucket.objects.all()
+            if (
+                file.key.endswith(".xml")
+                and any(name_pattern in file.key for name_pattern in allowed_file_patterns)
+                and all(name_pattern not in file.key for name_pattern in forbidden_file_patterns)
+                and file.last_modified.replace(tzinfo=None) >
+                datetime.datetime.strptime(last_processed_timestamp, "%Y-%m-%d %H:%M:%S")
+               ) or (file.key in input_fileset)
+        )
     # we need to reuse the generator
     # copy it to save memory
     files_to_download, files_to_download_backup = tee(files_to_download)
 
-    max_timestamp_this_run = [{"max_timestamp_this_run": max(file.last_modified
-                                                             for file in files_to_download_backup).replace(
-        tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")}]
+    max_timestamp_this_run = [
+        {
+            "max_timestamp_this_run": max(
+                    file.last_modified for file in files_to_download_backup
+                ).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        }
+    ]
 
     logging.info("Collected files to download.")
 
@@ -150,7 +178,10 @@ if __name__ == '__main__':
         dict_writer.writerows(max_timestamp_this_run)
 
     with open(f'{kbc_datadir}out/tables/esolutions_prices.csv', 'w', encoding='utf8') as csvfile:
-        dw = DictWriter(csvfile, fieldnames=list(set(wanted_columns + ["utctime_started", "filename"])))
+        fieldnames = wanted_columns + [_ for _ in ["utctime_started", "filename"] if _ not in wanted_columns]
+        dw = DictWriter(
+            csvfile,
+            fieldnames=fieldnames)
         dw.writeheader()
 
         for file in files_to_process:
@@ -158,7 +189,11 @@ if __name__ == '__main__':
             filename = file.split('/')[-1]
             logging.info(f"Processing file {filename}")
 
-            h = PricesHandler(dw, {'filename': filename, 'utctime_started': utctime_started})
+            h = PricesHandler(
+                    writer=dw,
+                    colnames=fieldnames,
+                    filedata={'filename': filename, 'utctime_started': utctime_started},
+                )
             xml.sax.parse(file, h)
             logging.info(f"File {filename} processing finished.")
 
