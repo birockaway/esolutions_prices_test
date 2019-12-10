@@ -8,7 +8,7 @@ import logging
 import datetime
 import os
 import boto3
-
+import sys
 
 class PricesHandler(xml.sax.ContentHandler):
 
@@ -144,13 +144,23 @@ if __name__ == '__main__':
     # copy it to save memory
     files_to_download, files_to_download_backup = tee(files_to_download)
 
-    max_timestamp_this_run = [
+    max_timestamp_this_run_tz = [
         {
             "max_timestamp_this_run": max(
-                    file.last_modified for file in files_to_download_backup
-                ).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+                    file.last_modified for file in files_to_download_backup,
+                default=None
+                )
         }
     ]
+
+    # exit if there are no new files to process
+    if max_timestamp_this_run_tz is None:
+        logging.info("No new files to download. Exiting script.")
+        sys.exit(0)
+    else:
+        max_timestamp_this_run = max_timestamp_this_run_tz.replace(
+            tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+
 
     logging.info("Collected files to download.")
 
