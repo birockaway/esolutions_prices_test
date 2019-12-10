@@ -146,7 +146,7 @@ if __name__ == '__main__':
     files_to_download, files_to_download_backup = tee(files_to_download)
 
     max_timestamp_this_run_tz = max(
-                    file.last_modified for file in files_to_download_backup,
+        (file.last_modified for file in files_to_download_backup),
                 default=None
                 )
 
