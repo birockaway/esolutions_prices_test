@@ -11,7 +11,7 @@ import sys
 import queue
 import threading
 import concurrent.futures
-from collections.abc import Iterable
+from collections.abc import Mapping, Iterable
 
 import boto3
 import logging_gelf.handlers
@@ -113,6 +113,7 @@ def extract_country_from_filename(filename):
 def clean_eshop_name(eshop):
     eshop_lower = eshop.lower()
     return eshop_lower.split('/')[0]
+
 
 def extract_frequency(filename):
     return 'direct' if '-hf-' not in filename else 'hf'
@@ -248,13 +249,12 @@ class Producer:
                 # this helps prioritize records when daily data actually arrive later
                 ts = self.utctime_started_datetime.strftime("%Y-%m-%d 00:00:00")
 
-
             h = PricesHandler(
                 task_queue=task_queue,
                 columns_mapping=self.columns_mapping,
                 column_names=self.wanted_columns,
                 filedata={'SOURCE': frequency, 'FREQ': 'd', 'SOURCE_ID': filename, 'TS': ts,
-                          'COUNTRY':  country}
+                          'COUNTRY': country}
             )
             xml.sax.parse(file, h)
             logging.info(f"File {filename} processing finished.")
@@ -271,10 +271,6 @@ class Producer:
         self.parse_files(task_queue)
 
 
-def is_iterable(obj):
-    return isinstance(obj, Iterable)
-
-
 def writer(task_queue, columns_list, threading_event, filepath):
     with open(filepath, 'w+') as outfile:
         results_writer = csv.DictWriter(outfile, fieldnames=columns_list, extrasaction='ignore')
@@ -284,11 +280,13 @@ def writer(task_queue, columns_list, threading_event, filepath):
             if chunk == 'DONE':
                 logging.info('DONE received. Exiting.')
                 threading_event.set()
-            elif not is_iterable(chunk):
-                # chunk is just a single dict
+            if isinstance(chunk, Mapping):
                 results_writer.writerow(chunk)
+            elif isinstance(chunk, Iterable):
+                results_writer.writerows(chunk)
             else:
-                results_writer.writerow(chunk)
+                logging.error(f'Chunk is neither Mapping, nor Iterable type. Chunk: {chunk}')
+                logging.info('Skipping')
 
 
 if __name__ == "__main__":
